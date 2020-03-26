@@ -1,0 +1,13 @@
+name: shiny-sir-infection-model
+title: Shiny-SIR-Infection-model
+username: carl
+account: carl
+server: connect.rstudioservices.com
+hostUrl: https://connect.rstudioservices.com/__api__
+appId: 713
+bundleId: 5176
+url: https://connect.rstudioservices.com/cv-sim-forecast/
+when: 1585149563.60491
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: app2.R|date-data-fetched.csv

@@ -1,0 +1,517 @@
+---
+title: "Coronavirus analysis"
+author: "Carl Howe, RStudio"
+date: "3/7/2020"
+output: html_document
+params:
+  input_country: "US"
+  percent_susceptible_population: 0.8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(dplyr)
+library(DT)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+library(readr)
+library(scales)
+library(plotly)
+library(here)
+library(glue)
+library(readr)
+library(stringr)
+
+
+# Function to read the raw CSV files. The files are aggregated to the country
+# level and then converted to long format
+
+clean_jhd_to_long <- function(df) {
+    df_str <- deparse(substitute(df))
+    var_str <- substr(df_str, 1, str_length(df_str) - 4)
+    
+    df %>% group_by(`Country/Region`) %>%
+        filter(`Country/Region` != "Cruise Ship") %>%
+        select(-`Province/State`, -Lat, -Long) %>%
+        mutate_at(vars(-group_cols()), sum) %>% 
+        distinct() %>%
+        ungroup() %>%
+        rename(country = `Country/Region`) %>%
+        pivot_longer(
+            -country, 
+            names_to = "date_str", 
+            values_to = var_str
+        ) %>%
+        mutate(date = mdy(date_str)) %>%
+        select(country, date, !! sym(var_str)) 
+}
+
+confirmed_raw <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+deaths_raw <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+
+raw_coronavirus <- clean_jhd_to_long(confirmed_raw) %>%
+    full_join(clean_jhd_to_long(deaths_raw)) %>%
+    arrange(country, date)
+
+coronavirus <- raw_coronavirus %>% 
+    pivot_longer(confirmed:deaths, values_to = "cases", names_to = "type")
+
+theme_set(theme_minimal())
+
+un_country_list <- read_csv(here::here("data/UNdata_Export_20200316.csv"))
+names(un_country_list) <- c("country", "year", "variant", "population")
+un_country_list %>% filter(year == 2019)
+
+coronavirus_countries <- coronavirus %>% 
+    select(country) %>% 
+    distinct(country)  ## for selecting a country
+
+excluded_countries <- coronavirus_countries %>% 
+    anti_join(un_country_list, by = c("country" = "country"))
+
+countries_needing_translation <-read_csv(here::here("excluded_countries_dictionary.csv"))
+
+select_countries <- c("All", coronavirus_countries, recursive = TRUE, use.names = FALSE)
+select_countries <- tibble(select_countries) %>% 
+    filter(select_countries != "Taiwan*" & select_countries != "Cruise Ship")
+names(select_countries) <- c("country")
+select_countries <- select_countries %>% 
+    arrange(country)
+full_countries <- select_countries %>% 
+    left_join(countries_needing_translation, by = c("country")) %>% 
+    mutate(UN_country = ifelse(is.na(UN_country), country, UN_country)) %>% 
+    left_join(un_country_list, by = c("UN_country" = "country")) %>% 
+    filter(year == "2019") 
+
+```
+
+## World-wide coronavirus model
+
+This is a visualization of the current infection state using the simplest possible Susceptible-Infection-Recovery model. Data comes from the Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE) [Coronavirus repository](https://github.com/CSSEGISandData/COVID-19) and [Rami Krispin's coronavirus package](https://ramikrispin.github.io/coronavirus/).
+
+```{r worldwide_raw_data}
+cv_ww <- coronavirus %>%
+  group_by(date, type) %>% 
+  summarize(cases = sum(cases)) %>% 
+  select(date,type,cases) %>% 
+  arrange(date)
+cv_ww <- cv_ww %>% 
+  mutate(type = ifelse(type == "confirmed", "infected", type))
+
+cc_ww_wide <- cv_ww %>% 
+  pivot_wider(names_from= type, values_from=c(cases)) %>% 
+  arrange(date)
+
+g <- ggplot(cv_ww, aes(x = date, y = cases, color = type, group = type)) + 
+  geom_line() +
+  scale_y_continuous(labels = comma_format(accuracy = 1)) +
+  labs(title = "Worldwide coronavirus infections",
+       caption = "Data sources: Johns Hopkins University and Rami Krispin's coronavirus package",
+       color = "", x = "", y = "")
+
+ggplotly(g, tooltip = c("x", "y", "group"))
+```
+
+## US coronavirus data
+
+Here are the US raw numbers.
+
+```{r us, echo=FALSE}
+cv_us <- coronavirus %>%
+  filter(country == "US") %>% 
+  group_by(date, type) %>%
+  drop_na(cases) %>% 
+  summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+  select(date,type,cases) %>% 
+  arrange(date)
+cv_us <- cv_us %>% 
+  mutate(type = ifelse(type == "confirmed", "infected", type))
+g <- ggplot(cv_us, aes(x = date, y = cases, color = type, group = type)) + 
+  scale_y_continuous(labels = comma_format(accuracy = 1)) +
+  geom_line() +
+  labs(title = "US Coronavirus Daily Updates",
+       caption = "Data sources: Johns Hopkins University and Rami Krispin's coronavirus package",
+       x = "", y = "", color = "")
+ggplotly(g, tooltip = c("x", "y", "group"))
+
+```
+
+## Coronovirus parameters
+
+```{r parameter_setting}
+total_susceptible_population <- 263300000
+infection_duration <- 14
+r0 <- 2.2
+beta <- r0 / infection_duration
+gamma <- 1 / infection_duration
+death_rate <- .02
+projection_duration <- 180 #in days
+
+parameter_string <- glue("Susceptible population = {prettyNum(total_susceptible_population, big.mark = ',')}, R0 = {r0}, infection duration = {infection_duration}, death rate = {death_rate}")
+```
+
+Now we'll model infection rates. The latest figures I've heard are an infection rate (R naught) of `r r0` people per infected person over the period in which they are infectious. We also assume a death rate of about `r round(death_rate * 100, 1)` percent and recovery and becoming non-infectious in `r infection_duration` days.
+
+```{r ww_model}
+
+ww_model <- cv_us
+ww_model <- ww_model %>% 
+   mutate(type = ifelse(type == "death", "deaths", type))
+
+## extend the date by project_duration days
+
+ww_wide <- ww_model %>% 
+  pivot_wider(names_from= type, values_from=c(cases)) %>% 
+  arrange(date)
+
+ww_date_range <- tibble(date =  ymd(seq(min(ww_wide$date), (max(ww_wide$date)), "days")))
+
+historic_range <- ww_date_range %>% 
+  left_join(ww_wide, by = "date")
+
+historic_rows <- nrow(historic_range)
+
+ww_projection_dates <- tibble(date =  ymd(seq(min(ww_wide$date), (max(ww_wide$date) + projection_duration), "days")))
+
+ww_range <- ww_projection_dates %>% 
+  left_join(ww_wide, by = "date")
+
+ww_projection <- ww_range %>% 
+  mutate(total_infections     = infected,
+         currently_infectious = infected - deaths,
+         new_infections       = 0,
+         new_deaths           = 0,
+         total_deaths         = deaths,
+         new_recoveries       = 0,
+         total_recoveries     = 0,
+         susceptible          = total_susceptible_population,
+         ds_dt                = 0,
+         di_dt                = 0,
+         dr_dt                = 0) %>% 
+  replace_na(list(cases_infected       = 0,
+                  cases_deaths         = 0,
+                  cases_recovered      = 0,
+                  cumsum_infected      = 0,
+                  cumsum_deaths        = 0,
+                  cumsum_recovered     = 0,
+                  total_infections     = 0, 
+                  currently_infectious = 0,
+                  new_infections       = 0, 
+                  new_deaths           = 0, 
+                  total_deaths         = 0,
+                  new_recoveries       = 0,
+                  total_recoveries     = 0)) %>% 
+  arrange(date)
+```
+
+```{r model_math}
+
+## run_model: Function to compute the SIR model on existing data.
+## takes the following arguments
+##
+## f               the data frame with the historical data
+## historical_row  the last row of the historical data
+##
+## All other parameters come from the global variables that define the disease in the chunk
+## coronavirus parameters
+
+## this is the function that does all the work on an historical infection dataframe
+## and creates a forecast data frame.
+
+run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
+    
+    ww_model <- f
+    ww_model <- ww_model %>% 
+        mutate(type = ifelse(type == "death", "deaths", type))
+    
+    ## extend the date by project_duration days
+    
+    ww_wide <- ww_model %>% 
+        pivot_wider(names_from= type, values_from=c(cases)) %>% 
+        arrange(date)
+    
+    ww_date_range <- tibble(date =  ymd(seq(min(ww_wide$date), (max(ww_wide$date)), "days")))
+    
+    historic_range <- ww_date_range %>% 
+        left_join(ww_wide, by = "date")
+    
+    historic_rows <- nrow(historic_range)
+    
+    ww_projection_dates <- tibble(date =  ymd(seq(min(ww_wide$date), (max(ww_wide$date) + proj_duration), "days")))
+    
+    ww_range <- ww_projection_dates %>% 
+        left_join(ww_wide, by = "date")
+    
+    ## OK, here's the model
+    ## Every day, we get new infections that's the (number of infectious people - deaths) * r0 / recovery_rate.
+    ## New deaths is just the death_rate times infected people.
+    ## New recoveries is the number of infected people from 14 days ago - number of deaths
+    ## New number of infected people is prior number of infected people + new infections - deaths - new recoveries
+    ## first, let's initialize our projected columns with the actual data.
+    fnew <- ww_range %>% 
+        mutate(total_infections     = infected,
+               currently_infectious = infected - deaths,
+               new_infections       = 0,
+               new_deaths           = 0,
+               total_deaths         = deaths,
+               new_recoveries       = 0,
+               total_recoveries     = 0,
+               susceptible          = total_susceptible_population,
+               ds_dt                = 0,
+               di_dt                = 0,
+               dr_dt                = 0) %>% 
+        replace_na(list(cases_infected       = 0,
+                        cases_deaths         = 0,
+                        cases_recovered      = 0,
+                        cumsum_infected      = 0,
+                        cumsum_deaths        = 0,
+                        cumsum_recovered     = 0,
+                        total_infections     = 0, 
+                        currently_infectious = 0,
+                        new_infections       = 0, 
+                        new_deaths           = 0, 
+                        total_deaths         = 0,
+                        new_recoveries       = 0,
+                        total_recoveries     = 0)) %>% 
+        arrange(date)
+    
+    ## SIR model parameter calculation
+    
+    beta <- as.numeric(rnaught / duration)
+    gamma <- as.numeric(1 / duration)
+    
+    daily_infection_probability <- rnaught / duration
+    
+    for (i in (historic_rows + 1):nrow(fnew)) {
+        
+        ## Let's calculate the SIR model derivatives
+        
+        fnew$ds_dt[i] <- round(-beta * fnew$currently_infectious[i - 1] * fnew$susceptible[i - 1] / population) - fnew$new_deaths[i - 1]
+        fnew$di_dt[i] <- round(-fnew$ds_dt[i] - gamma * fnew$currently_infectious[i - 1])
+        fnew$dr_dt[i] <- round(gamma * fnew$currently_infectious[i - 1])
+        
+        ## Now update the state with derivatives
+        
+        fnew$new_infections[i]       <-  ifelse (fnew$di_dt[i] < 0, 0, fnew$di_dt[i])
+        fnew$currently_infectious[i] <-  fnew$currently_infectious[i - 1] + fnew$di_dt[i]
+        fnew$new_deaths[i]           <-  round(fnew$currently_infectious[i - 1] * drate / duration)
+        fnew$new_recoveries[i]       <-  fnew$dr_dt[i]
+        fnew$susceptible[i]          <-  fnew$susceptible[i - 1]      + fnew$ds_dt[i]
+        fnew$total_recoveries[i]     <-  fnew$total_recoveries[i - 1] + fnew$new_recoveries[i]
+        fnew$total_deaths[i]         <-  fnew$total_deaths[i - 1]     + fnew$new_deaths[i]
+        fnew$total_infections[i]     <-  fnew$total_infections[i - 1] + fnew$new_infections[i]
+    }
+    return(fnew)
+}
+
+derive_country_stats <- function() {     ## for debugging
+  if (params$input_country == "All") {
+    df <- coronavirus %>%
+      group_by(date, type) %>% 
+      summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+      select(date,type,cases) %>% 
+      arrange(date)
+  } else {
+    df <- coronavirus %>%
+      filter(country == params$input_country) %>% 
+      group_by(date, type) %>%
+      drop_na(cases) %>% 
+      summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+      select(date,type,cases) %>% 
+      arrange(date)
+  }
+  df <- df %>% 
+    mutate(type = ifelse(type == "confirmed", "infected", type))
+  df
+}
+
+model_builder <- function(){
+  
+  country_info <- full_countries %>% 
+    filter(country == params$input_country) %>% 
+    head(1)
+  
+  df <- derive_country_stats()
+  run_model(df, total_susceptible_population, infection_duration,
+            r0, death_rate, projection_duration)
+}
+```
+
+```{r more_model_math}
+options(scipen = 999)
+model_result <- model_builder()
+write.csv(model_result, here::here("model-result.csv"))
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+## name mapping
+
+name_map <- tribble( ~column_name, ~`Model Output`,
+                     "total_infections",      "Total Infections",
+                     "currently_infectious",  "Currently Infectious",
+                     "new_infections",        "New Infections",
+                     "new_deaths",            "New Deaths",
+                     "total_deaths",          "Total Deaths",
+                     "new_recoveries",        "New Recoveries",
+                     "total_recoveries",      "Total Recoveries",
+                     "susceptible",           "Suspectible Population")
+
+projection_long <- model_result %>% 
+  pivot_longer(total_infections:total_recoveries)
+
+max_infectious <- model_result %>% 
+  filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+max_plot_y_value <- max(projection_long$value) * 0.90
+max_infection_text_x_value <- max_infectious$date - days(3)
+
+country_info <- full_countries %>% 
+  filter(country == params$input_country) %>% 
+  head(1)
+total_susceptible_population <- country_info$population * params$percent_susceptible_population * 1000
+
+plot_df <- projection_long %>% 
+  left_join(name_map, by = c("name" = "column_name"))
+
+g <-ggplot(plot_df, aes(x = date, y = value, color = `Model Output`, group = `Model Output`)) +
+  geom_line() +
+  scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
+  scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+               expand = expansion(0, 0.4)) +
+  scale_color_brewer(palette = "Dark2") +
+  annotate("segment", x = max_infectious$date, xend = max_infectious$date, y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dotted") +
+  annotate("text",  x = max_infection_text_x_value, y = max_plot_y_value, 
+           color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
+           label = paste0("Peak infectious population\n",
+                          prettyNum(round(max_infectious$currently_infectious), big.mark = ","),
+                          "\non ", format(max_infectious$date, "%B %d"))) +
+  annotate("text", x = max_infection_text_x_value + days(30), y = final_values$total_deaths * 2.5, 
+           color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
+           label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  labs(title = paste0(params$input_country, " Coronavirus Forecast\n"),
+       x = "", y = "", color = "")
+
+ggplotly(g, tooltip = c("x", "y", "group"))
+```
+
+```{r short_term}
+short_duration <- 30
+projection_long <- model_result %>% 
+  pivot_longer(total_infections:total_recoveries) %>%
+  filter(date <= date(now() + days(short_duration))) %>% 
+  select(date, name, value)
+
+plot_df <- projection_long %>% 
+  left_join(name_map, by = c("name" = "column_name"))
+
+g <-ggplot(plot_df, aes(x = date, y = value, color = `Model Output`, group = `Model Output`)) +
+  geom_line() +
+  scale_y_continuous(limits = c(0, max(projection_long$value)), labels = scales::comma) +
+  scale_x_date(date_breaks = "1 week", limits = c(date(min(projection_long$date)), date(now() + days(short_duration))), date_labels = "%B %d") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+g <- g + labs(title = paste0(short_duration, "-Day US COVID-19 SIR Model Forecast"),
+              caption = paste0(parameter_string, "\nData sources: Johns Hopkins University and Rami Krispin's coronavirus package"),
+              x = "", y = "", color = "")
+ggplotly(g, tooltip = c("x", "y", "group"))
+
+```
+
+```{r short_term_2}
+model_result <- model_builder() %>% 
+  filter(date <= todays_values_x_value + days(33))
+
+todays_values <- derive_country_stats() %>% 
+  ungroup() %>% 
+  filter(date == max(date)) %>% 
+  mutate(type = ifelse(type == "death", "Deaths", str_to_title(type)),
+         casestring = prettyNum(abs(cases), big.mark = ","),
+         datestring = format(date, "%B %d"))
+
+todays_values_x_value <- todays_values$date - days(3)
+todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
+                                paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
+
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+## name mapping
+
+name_map <- tribble( ~column_name, ~Category,
+                     "total_infections",      "Total Infections",
+                     "currently_infectious",  "Currently Infectious",
+                     "new_infections",        "New Infections",
+                     "new_deaths",            "New Deaths",
+                     "total_deaths",          "Total Deaths",
+                     "new_recoveries",        "New Recoveries",
+                     "total_recoveries",      "Total Recoveries",
+                     "susceptible",           "Suspectible Population")
+
+projection_long <- model_result %>% 
+  pivot_longer(total_infections:total_recoveries)
+
+max_infectious <- model_result %>% 
+  filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+max_plot_y_value <- max(projection_long$value) * 0.90
+max_infection_text_x_value <- max_infectious$date - days(3)
+
+country_info <- full_countries %>% 
+  filter(country == params$input_country) %>% 
+  head(1)
+
+plot_df <- projection_long %>% 
+  left_join(name_map, by = c("name" = "column_name")) %>% 
+  select(date, value, Category)
+
+g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
+  geom_line() +
+  scale_y_continuous(label = comma) +
+  scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), todays_values_x_value + days(33)), date_labels = "%B %d",
+               expand = expansion(0, 0.4)) +
+  scale_color_brewer(palette = "Dark2") +
+  
+  ## annotate for latest reported values
+  
+  annotate("segment", x = todays_values$date, xend = todays_values$date, y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
+  annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+           color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
+           label = todays_values_string) +
+  
+  ## and for peak infectious population
+  
+  annotate("segment", x = max_infectious$date, xend = max_infectious$date, y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dashed") +
+  annotate("text",  x = max_infection_text_x_value - days(7), y = max_plot_y_value, 
+           color = "gray20", size = 2.75,  hjust = "inward", vjust = "inward",
+           label = paste0("On ",format(max_infectious$date, "%B %d"),
+                          "\nInfected: ", prettyNum(round(max_infectious$currently_infectious), 
+                                                    big.mark = ","),
+                          "\nDeaths: ", prettyNum(round(max_infectious$total_deaths), big.mark = ","),
+                          "\non ", format(max_infectious$date, "%B %d"))) +
+  
+  ## and for total deaths            
+  
+  annotate("text", x = max_infection_text_x_value + days(30), y = final_values$total_deaths * 3, 
+           color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
+           label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  labs(x = "", y = "", color = "")
+
+ggplotly(g, tooltip = c("x", "y", "group"))
+
+```
+
