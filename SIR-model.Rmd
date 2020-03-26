@@ -89,7 +89,7 @@ full_countries <- select_countries %>%
 
 ## World-wide coronavirus model
 
-This is a visualization of the current infection state using the simplest possible Susceptible-Infection-Recovery model. Data comes from the Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE) [Coronavirus repository](https://github.com/CSSEGISandData/COVID-19) and [Rami Krispin's coronavirus package](https://ramikrispin.github.io/coronavirus/).
+This is a visualization of the current infection state using the simplest possible Susceptible-Infection-Recovery model. Data comes from the Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE) [Coronavirus repository](https://github.com/CSSEGISandData/COVID-19). Country population information comes from the United Nations.
 
 ```{r worldwide_raw_data}
 cv_ww <- coronavirus %>%
@@ -426,8 +426,6 @@ ggplotly(g, tooltip = c("x", "y", "group"))
 ```
 
 ```{r short_term_2}
-model_result <- model_builder() %>% 
-  filter(date <= todays_values_x_value + days(33))
 
 todays_values <- derive_country_stats() %>% 
   ungroup() %>% 
@@ -439,6 +437,8 @@ todays_values <- derive_country_stats() %>%
 todays_values_x_value <- todays_values$date - days(3)
 todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
                                 paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
+model_result <- model_builder() %>% 
+  filter(date <= todays_values_x_value + days(33))
 
 final_values <- model_result %>% 
   filter(date == max(model_result$date)) %>% 
