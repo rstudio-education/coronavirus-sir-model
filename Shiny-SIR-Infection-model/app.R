@@ -446,8 +446,7 @@ server <- function(input, output) {
                      label = paste0("On ",format(max_infectious$date, "%B %d"),
                                     "\nInfected: ", prettyNum(round(max_infectious$currently_infectious), 
                                                               big.mark = ","),
-                                    "\nDeaths: ", prettyNum(round(max_infectious$total_deaths), big.mark = ","),
-                                    "\non ", format(max_infectious$date, "%B %d"))) +
+                                    "\nDeaths: ", prettyNum(round(max_infectious$total_deaths), big.mark = ","))) +
             
             ## and for total deaths            
             
