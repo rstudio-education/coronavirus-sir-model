@@ -180,6 +180,7 @@ ui <- fluidPage(
     hr(),
     p(div(HTML("This model pulls daily data published by Johns Hopkins regarding the coronavirus infections around the world and applies a simple <em>Susceptible / Infectious / Recovery</em> or <em>SIR</em> model to that data."))), 
     p(div(HTML("Disclaimer: This simulation is for research and educational purposes only and is not intended to be a tool for decision-making."))),
+    p(div(HTML('Source code <a href="https://github.com/rstudio-education/coronavirus-sir-model">is available here.</a>' ))),
     hr(),    
     
     # Sidebar with a slider input for number of bins 
