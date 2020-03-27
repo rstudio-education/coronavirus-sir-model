@@ -56,8 +56,6 @@ coronavirus <- raw_coronavirus %>%
 
 options(shiny.error = browser)
 
-theme_set(theme_minimal())
-
 un_country_list <- read_csv("data/UNdata_Export_20200316.csv")
 names(un_country_list) <- c("country", "year", "variant", "population")
 un_country_list %>% filter(year == 2019)
@@ -205,8 +203,8 @@ ui <- fluidPage(
                         value = 2.2, step = 0.1),
             sliderInput(inputId = "death_rate",
                         label = "Death Rate: ",
-                        min = 1, max = 100, post = "%",
-                        value = 2, step = 1),
+                        min = 0.1, max = 20, post = "%",
+                        value = 1, step = 0.1),
             sliderInput(inputId = "projection_duration",
                         label = "Length of Projection (Days): ",
                         min = 10, max = 365,
@@ -226,7 +224,7 @@ ui <- fluidPage(
            textOutput("time_to_max"),
            br(),
            plotlyOutput("virusPlot"),
-           width = 9
+           width = 7
         )
     )
 )
@@ -279,6 +277,8 @@ server <- function(input, output) {
     })
     
     output$virusPlot <- renderPlotly({
+        theme_set(theme_minimal()) %+replace%
+            theme(text=element_text(size=10,  family="Sans"))
         model_result <- model_builder()
         
         todays_values <- derive_country_stats() %>% 
@@ -360,11 +360,16 @@ server <- function(input, output) {
                      label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
             labs(x = "", y = "", color = "")
-        
-        ggplotly(g, tooltip = c("x", "y", "group"))
+        fig <- ggplotly(g, tooltip = c("x", "y", "group"))
+        t <- list(
+            family = "arial",
+            size = 12)
+        fig <- fig %>% layout(font=t)
     })
     
     output$virusPlot30Days <- renderPlotly({
+        theme_set(theme_minimal()) %+replace%
+            theme(text=element_text(size=12,  family="Sans"))
         todays_values <- derive_country_stats() %>% 
             ungroup() %>% 
             filter(date == max(date)) %>% 
@@ -435,7 +440,7 @@ server <- function(input, output) {
             ## and for peak infectious population
             
             annotate("segment", x = max_infectious$date, xend = max_infectious$date, y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dashed") +
-            annotate("text",  x = max_infection_text_x_value - days(7), y = max_plot_y_value, 
+            annotate("text",  x = max_infection_text_x_value - days(14), y = max_plot_y_value, 
                      color = "gray20", size = 2.75,  hjust = "inward", vjust = "inward",
                      label = paste0("On ",format(max_infectious$date, "%B %d"),
                                     "\nInfected: ", prettyNum(round(max_infectious$currently_infectious), 
@@ -450,9 +455,12 @@ server <- function(input, output) {
                      label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
             labs(x = "", y = "", color = "")
-        
-        ggplotly(g, tooltip = c("x", "y", "group"))
-    })
+        fig <- ggplotly(g, tooltip = c("x", "y", "group"))
+        t <- list(
+            family = "arial",
+            size = 12)
+        fig <- fig %>% layout(font=t)
+        })
     
     
     output$title <- renderText({
@@ -465,8 +473,14 @@ server <- function(input, output) {
             filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
             head(n = 1)       ## in case we get multiple results
         
-        glue("{max_infectious$date - today()} days until infections peak in {input$country}.")
-    })
+        first_string <- glue("{max_infectious$date - today()} days until infections peak in {input$country}.")
+        country_info <- full_countries %>% 
+            filter(country == input$country) %>% 
+            head(1)
+        total_susceptible_population <- country_info$population * input$percent_susceptible_population/100 * 1000
+        second_string <- glue("Susceptible population = {prettyNum(round(total_susceptible_population/1e6,1), big.mark = ',')}M, R0 = {input$r0}, infection duration = {input$infection_duration}, death rate = {input$death_rate}%")
+        return(c(first_string, second_string))
+        })
     
     output$caption <- renderText({
         country_info <- full_countries %>% 
