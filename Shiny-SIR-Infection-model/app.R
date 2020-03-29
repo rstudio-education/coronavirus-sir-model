@@ -374,17 +374,15 @@ server <- function(input, output) {
         todays_values <- derive_country_stats() %>% 
             ungroup() %>% 
             filter(date == max(date)) %>% 
-            head(1) %>% 
             mutate(type = ifelse(type == "death", "Deaths", str_to_title(type)),
                    casestring = prettyNum(abs(cases), big.mark = ","),
                    datestring = format(date, "%B %d"))
         todays_values_x_value <- todays_values$date - days(3)
         todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
                                         paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
+
         model_result <- model_builder() %>% 
-            filter(date <= todays_values_x_value + days(33))
-        
-        
+            filter(date <= head(todays_values_x_value,1) + days(33))
         
         final_values <- model_result %>% 
             filter(date == max(model_result$date)) %>% 
