@@ -81,9 +81,18 @@ full_countries <- select_countries %>%
     left_join(un_country_list, by = c("UN_country" = "country")) %>% 
     filter(year == "2019") 
 
+nytimes <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv")
+nytimes_data <- nytimes %>% 
+    select(-fips)
+nytimes_us_cases <- nytimes_data %>% 
+    pivot_longer(cases:deaths,  values_to = "cases", names_to = "type")
 
-## this is the function that does all the work on an historical infection dataframe
-## and creates a forecast data frame.
+state_populations <- read_csv(here::here("data/us-state-populations.csv"))
+select_states <- c("All", state_populations$state, recursive = TRUE, use.names = FALSE)
+
+nytimes_us_cases <- nytimes_us_cases %>% 
+    left_join(state_populations, by = "state") %>% 
+    filter(!is.na(population))
 
 run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
     
@@ -123,7 +132,7 @@ run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
                total_deaths         = deaths,
                new_recoveries       = 0,
                total_recoveries     = 0,
-               susceptible          = population,
+               susceptible          = population - infected - deaths,
                ds_dt                = 0,
                di_dt                = 0,
                dr_dt                = 0) %>% 
@@ -190,6 +199,10 @@ ui <- fluidPage(
                         label = "Country: ",
                         choices = full_countries$country,
                         selected = "US"),
+            selectInput(inputId = "state",
+                        label = "US State: ",
+                        choices = select_states,
+                        selected = "All"),
             sliderInput(inputId = "percent_susceptible_population", 
                         label = "Population Susceptible: ", 
                         min = 5, max = 100, 
@@ -215,7 +228,7 @@ ui <- fluidPage(
 
         # Show a plot of the generated distribution
         mainPanel(
-           h3(textOutput("title")),
+           h3(textOutput("country_title")),
            h4(HTML("Next 30 Days")),
            textOutput("caption"),
            br(),
@@ -225,13 +238,18 @@ ui <- fluidPage(
            textOutput("time_to_max"),
            br(),
            plotlyOutput("virusPlot"),
+           h4(textOutput("state_title")),
+#          textOutput("time_to_max"),
+           br(),
+           plotlyOutput("stateVirusPlot"),
            width = 7
         )
     )
 )
 
 testinputs <- function() {
-    input <- tibble(country = "All",
+    input <- tibble(country = "US",
+    state = "Massachusetts",
     percent_susceptible_population = 80,
     infection_duration = 14,
     r0 = 2.2,
@@ -263,10 +281,10 @@ server <- function(input, output) {
             mutate(type = ifelse(type == "confirmed", "infected", type))
         df
     })
-    
-    model_builder <- reactive({
-#   model_builder <- function(){
-            
+
+model_builder <- reactive({
+        #   model_builder <- function(){
+        
         country_info <- full_countries %>% 
             filter(country == input$country) %>% 
             head(1)
@@ -277,6 +295,44 @@ server <- function(input, output) {
                   input$r0, input$death_rate/100, input$projection_duration)
     })
     
+derive_state_stats <- reactive({     ## for debugging
+## derive_state_stats <- function() {
+        if (input$state == "All") {
+            df <- nytimes_us_cases %>%
+                group_by(date, type) %>% 
+                summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+                select(date,type,cases) %>% 
+                arrange(date)
+        } else {
+            df <- nytimes_us_cases %>%
+                filter(state == input$state) %>% 
+                group_by(date, type) %>%
+                drop_na(cases) %>% 
+                summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+                select(date,type,cases) %>% 
+                arrange(date)
+        }
+        df <- df %>% 
+            mutate(type = ifelse(type == "cases", "infected", type))
+        df
+}
+)
+
+ state_model_builder <- reactive({
+#   state_model_builder <- function(){
+        
+        state_info <- nytimes_us_cases %>% 
+            filter(state == input$state) %>% 
+            head(1)
+        state_population_susceptible <- state_info$population * input$percent_susceptible_population/100
+        df <- derive_state_stats()
+        run_model(df, state_population_susceptible, input$infection_duration,
+                  input$r0, input$death_rate/100, input$projection_duration)
+    
+   }
+)
+
+       
     output$virusPlot <- renderPlotly({
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=10,  family="Sans"))
@@ -322,11 +378,6 @@ server <- function(input, output) {
         
         max_plot_y_value <- max(projection_long$value) * 0.90
         max_infection_text_x_value <- max_infectious$date - days(3)
-        
-        country_info <- full_countries %>% 
-            filter(country == input$country) %>% 
-            head(1)
-        total_susceptible_population <- country_info$population * input$percent_susceptible_population/100 * 1000
         
         plot_df <- projection_long %>% 
             left_join(name_map, by = c("name" = "column_name"))
@@ -414,10 +465,6 @@ server <- function(input, output) {
         max_plot_y_value <- max(projection_long$value) * 0.90
         max_infection_text_x_value <- max_infectious$date - days(3)
         
-        country_info <- full_countries %>% 
-            filter(country == input$country) %>% 
-            head(1)
-        
         plot_df <- projection_long %>% 
             left_join(name_map, by = c("name" = "column_name")) %>% 
             select(date, value, Category)
@@ -459,11 +506,104 @@ server <- function(input, output) {
             size = 12)
         fig <- fig %>% layout(font=t)
         })
+   
+    output$stateVirusPlot <- renderPlotly({
+    if (input$state == "All") {
+        return(NULL)
+    }
+        theme_set(theme_minimal()) %+replace%
+            theme(text=element_text(size=10,  family="Sans"))
+        model_result <- state_model_builder()
+        
+        todays_values <- derive_state_stats() %>% 
+            ungroup() %>% 
+            filter(date == max(date)) %>% 
+            mutate(type = ifelse(type == "death", "Deaths", str_to_title(type)),
+                   casestring = prettyNum(abs(cases), big.mark = ","),
+                   datestring = format(date, "%B %d"))
+        
+        todays_values_x_value <- todays_values$date - days(3)
+        todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
+                                        paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        ## name mapping
+        
+        name_map <- tribble( ~column_name, ~Category,
+                             "total_infections",      "Total Infections",
+                             "currently_infectious",  "Currently Infectious",
+                             "new_infections",        "New Infections",
+                             "new_deaths",            "New Deaths",
+                             "total_deaths",          "Total Deaths",
+                             "new_recoveries",        "New Recoveries",
+                             "total_recoveries",      "Total Recoveries",
+                             "susceptible",           "Suspectible Population")
+        
+        projection_long <- model_result %>% 
+            pivot_longer(total_infections:susceptible)
+        
+        max_infectious <- model_result %>% 
+            filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        max_plot_y_value <- max(projection_long$value) * 0.90
+        max_infection_text_x_value <- max_infectious$date - days(3)
+        
+        plot_df <- projection_long %>% 
+            left_join(name_map, by = c("name" = "column_name"))
+        
+        g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
+            geom_line() +
+            scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
+            scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+                         expand = expansion(0, 0.4)) +
+            scale_color_brewer(palette = "Dark2") +
+            
+            ## annotate for latest reported values
+            
+            annotate("segment", x = todays_values$date, xend = todays_values$date, y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
+            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+                     color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = todays_values_string) +
+            
+            ## and for peak infectious population
+            
+            annotate("segment", x = max_infectious$date, xend = max_infectious$date, y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dashed") +
+            annotate("text",  x = max_infection_text_x_value, y = max_plot_y_value, 
+                     color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = paste0("Peak infectious population\n",
+                                    prettyNum(round(max_infectious$currently_infectious), big.mark = ","),
+                                    "\non ", format(max_infectious$date, "%B %d"))) +
+            
+            ## and for total deaths            
+            
+            annotate("text", x = max_infection_text_x_value + days(30), y = final_values$total_deaths * 3, 
+                     color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
+                     label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+            labs(title = "State projection", x = "", y = "", color = "")
+        fig <- ggplotly(g, tooltip = c("x", "y", "group"))
+        t <- list(
+            family = "arial",
+            size = 12)
+        fig <- fig %>% layout(font=t)
+    })
     
     
-    output$title <- renderText({
+    output$country_title <- renderText({
         glue("{input$country} Coronavirus Forecast")
             })
+    
+    output$state_title <- renderText({
+        glue("{input$state} Coronavirus Forecast")
+    })
     
     output$time_to_max <- renderText({
         model_result <- model_builder()

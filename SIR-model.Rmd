@@ -5,6 +5,7 @@ date: "3/7/2020"
 output: html_document
 params:
   input_country: "US"
+  input_state: "Massachusetts"
   percent_susceptible_population: 0.8
 ---
 
@@ -85,6 +86,17 @@ full_countries <- select_countries %>%
     left_join(un_country_list, by = c("UN_country" = "country")) %>% 
     filter(year == "2019") 
 
+nytimes <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv")
+nytimes_data <- nytimes %>% 
+  select(-fips)
+nytimes_us_cases <- nytimes_data %>% 
+  pivot_longer(cases:deaths,  values_to = "cases", names_to = "type")
+
+state_populations <- read_csv(here::here("data/us-state-populations.csv"))
+
+nytimes_us_cases <- nytimes_us_cases %>% 
+  left_join(state_populations, by = "state") %>% 
+  filter(!is.na(population))
 ```
 
 ## World-wide coronavirus model
@@ -138,10 +150,36 @@ ggplotly(g, tooltip = c("x", "y", "group"))
 
 ```
 
+## Massachusetts coronavirus data
+
+Here are the US raw numbers.
+
+```{r massachusetts, echo=FALSE}
+cv_ma <- nytimes_us_cases %>%
+  filter(state == "Massachusetts") %>% 
+  group_by(date, type) %>%
+  drop_na(cases) %>% 
+  summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+  select(date,type,cases) %>% 
+  arrange(date)
+cv_ma <- cv_ma %>% 
+  mutate(type = ifelse(type == "cases", "infected", type))
+g <- ggplot(cv_ma, aes(x = date, y = cases, color = type, group = type)) + 
+  scale_y_continuous(labels = comma_format(accuracy = 1)) +
+  geom_line() +
+  labs(title = "Massachusetts Coronavirus Daily Updates",
+       caption = "Data sources: New York Times",
+       x = "", y = "", color = "")
+ggplotly(g, tooltip = c("x", "y", "group"))
+
+```
+
+
 ## Coronovirus parameters
 
 ```{r parameter_setting}
 total_susceptible_population <- 263300000
+percent_susceptible_population <- 0.80
 infection_duration <- 14
 r0 <- 2.2
 beta <- r0 / infection_duration
@@ -258,7 +296,7 @@ run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
                total_deaths         = deaths,
                new_recoveries       = 0,
                total_recoveries     = 0,
-               susceptible          = total_susceptible_population,
+               susceptible          = population - infected - deaths,
                ds_dt                = 0,
                di_dt                = 0,
                dr_dt                = 0) %>% 
@@ -337,12 +375,52 @@ model_builder <- function(){
   run_model(df, total_susceptible_population, infection_duration,
             r0, death_rate, projection_duration)
 }
+
+
 ```
 
-```{r more_model_math}
+```{r state_computations}
+
+derive_state_stats <- function() {     ## for debugging
+  if (params$input_state == "All") {
+    df <- nytimes_us_cases %>%
+      group_by(date, type) %>% 
+      summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+      select(date,type,cases) %>% 
+      arrange(date)
+  } else {
+    df <- nytimes_us_cases %>%
+      filter(state == params$input_state) %>% 
+      group_by(date, type) %>%
+      drop_na(cases) %>% 
+      summarize(cases = sum(cases, na.rm = TRUE)) %>% 
+      select(date,type,cases) %>% 
+      arrange(date)
+  }
+  df <- df %>% 
+    mutate(type = ifelse(type == "cases", "infected", type))
+  df
+}
+
+state_model_builder <- function(){
+  
+  state_info <- nytimes_us_cases %>% 
+    filter(state == params$input_state) %>% 
+    head(1)
+  population <- state_info$population * percent_susceptible_population/100
+  df <- derive_state_stats()
+  run_model(df, population, infection_duration,
+            r0, death_rate, projection_duration)
+}
+
+```
+
+
+```{r plot_all_us}
 options(scipen = 999)
 model_result <- model_builder()
-write.csv(model_result, here::here("model-result.csv"))
+
+## write.csv(model_result, here::here("model-result.csv"))
 final_values <- model_result %>% 
   filter(date == max(model_result$date)) %>% 
   head(n = 1)       ## in case we get multiple results
@@ -402,6 +480,76 @@ g <-ggplot(plot_df, aes(x = date, y = value, color = `Model Output`, group = `Mo
 
 ggplotly(g, tooltip = c("x", "y", "group"))
 ```
+
+
+```{r plot_all_massachusetts}
+options(scipen = 999)
+model_result <- state_model_builder()
+
+## write.csv(model_result, here::here("model-result.csv"))
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+## name mapping
+
+name_map <- tribble( ~column_name, ~`Model Output`,
+                     "total_infections",      "Total Infections",
+                     "currently_infectious",  "Currently Infectious",
+                     "new_infections",        "New Infections",
+                     "new_deaths",            "New Deaths",
+                     "total_deaths",          "Total Deaths",
+                     "new_recoveries",        "New Recoveries",
+                     "total_recoveries",      "Total Recoveries",
+                     "susceptible",           "Suspectible Population")
+
+projection_long <- model_result %>% 
+  pivot_longer(total_infections:total_recoveries)
+
+max_infectious <- model_result %>% 
+  filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+final_values <- model_result %>% 
+  filter(date == max(model_result$date)) %>% 
+  head(n = 1)       ## in case we get multiple results
+
+max_plot_y_value <- max(projection_long$value) * 0.90
+max_infection_text_x_value <- max_infectious$date - days(3)
+
+state_info <- nytimes_us_cases %>% 
+    filter(state == params$input_state) %>% 
+    head(1)
+total_susceptible_population <- state_info$population * params$percent_susceptible_population
+
+plot_df <- projection_long %>% 
+  left_join(name_map, by = c("name" = "column_name"))
+
+g <-ggplot(plot_df, aes(x = date, y = value, color = `Model Output`, group = `Model Output`)) +
+  geom_line() +
+  scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
+  scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), 
+                                                   max(projection_long$date) + days(10)), 
+               date_labels = "%B %d",
+               expand = expansion(0, 0.4)) +
+  scale_color_brewer(palette = "Dark2") +
+  annotate("segment", x = max_infectious$date, xend = max_infectious$date, 
+           y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dotted") +
+  annotate("text",  x = max_infection_text_x_value, y = max_plot_y_value, 
+           color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
+           label = paste0("Peak infectious population in ", params$input_state, "\n",
+                          prettyNum(round(max_infectious$currently_infectious), big.mark = ","),
+                          "\non ", format(max_infectious$date, "%B %d"))) +
+  annotate("text", x = max_infection_text_x_value + days(30), y = final_values$total_deaths * 2.5, 
+           color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
+           label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  labs(title = paste0(params$input_state, " Coronavirus Forecast\n"),
+       x = "", y = "", color = "")
+
+ggplotly(g, tooltip = c("x", "y", "group"))
+```
+
 
 ```{r short_term}
 short_duration <- 30
