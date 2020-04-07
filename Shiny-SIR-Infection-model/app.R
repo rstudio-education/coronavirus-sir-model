@@ -126,16 +126,16 @@ run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
     ## first, let's initialize our projected columns with the actual data.
     fnew <- ww_range %>% 
         mutate(total_infections     = infected,
-               currently_infectious = infected - deaths,
-               new_infections       = 0,
-               new_deaths           = 0,
+               currently_infectious = infected - lag(infected, duration) - deaths,
+               new_infections       = infected - lag(infected),
+               new_deaths           = deaths - lag(deaths),
                total_deaths         = deaths,
-               new_recoveries       = 0,
-               total_recoveries     = 0,
+               total_recoveries     = lag(infected, duration) - deaths,
+               new_recoveries       = total_recoveries - lag(total_recoveries),
                susceptible          = population - infected - deaths,
-               ds_dt                = 0,
-               di_dt                = 0,
-               dr_dt                = 0) %>% 
+               ds_dt                = susceptible - lag(susceptible),
+               di_dt                = new_infections,
+               dr_dt                = new_recoveries) %>% 
         replace_na(list(cases_infected       = 0,
                         cases_deaths         = 0,
                         cases_recovered      = 0,
@@ -187,9 +187,15 @@ ui <- fluidPage(
     # Application title
     titlePanel("Coronavirus SIM Model"),
     hr(),
-    p(div(HTML("This model pulls daily data published by Johns Hopkins regarding the coronavirus infections around the world and applies a simple <em>Susceptible / Infectious / Recovery</em> or <em>SIR</em> model to that data."))), 
-    p(div(HTML("Disclaimer: This simulation is for research and educational purposes only and is not intended to be a tool for decision-making."))),
-    p(div(HTML('Source code <a href="https://github.com/rstudio-education/coronavirus-sir-model">is available here.</a>' ))),
+    p(div(HTML("This application downloads daily data published by Johns Hopkins and the New York Times regarding coronavirus infections in global countries and US states."),
+          HTML("It then applies a <a href='https://en.wikipedia.org/wiki/Compartmental_models_in_epidemiology#The_SIR_model'><em>Susceptible / Infectious / Recovery</em> or <em>SIR</em> model</a> to that data to estimate spread of the virus."))), 
+    p(div(HTML("You may vary the parameters of the model using the sliders on the left. Hover over the various curves to see values."),
+          HTML("Click on legend elements to remove or add curves. Double click on a legend element to only show that curve."),
+          HTML("To simulate the effects of social distancing, adjust the percentage of the population that is susceptible to a lower value."))), 
+    p(div(HTML("Disclaimer: I am not an epidemiologist, so do not consider this anything more than a mathematical exploration."),
+          HTML("This model is considerably less sophisticated than those used by professional epidemiologists."),
+          HTML("It is only intended to provide a feel for the epidemiological forces at work."))),
+    p(div(HTML('Written by Carl Howe. Source code <a href="https://github.com/rstudio-education/coronavirus-sir-model">is available here.</a>' ))),
     hr(),    
     
     ## Show a sidebar
@@ -219,7 +225,7 @@ ui <- fluidPage(
         mainPanel(width = 9,
             ## Now show two tabs for outputs, one for countries and the other for US states
             tabsetPanel(
-                tabPanel("Country", fluid = TRUE,
+                tabPanel("Countries", fluid = TRUE,
                          mainPanel(
                              selectInput(inputId = "country",
                                          label = "Select Country",
@@ -231,13 +237,17 @@ ui <- fluidPage(
                              br(),
                              plotlyOutput("virusPlot30Days"),
                              br(),
-                             h4(HTML("Peak Infectious Projection")),
+                             h4(HTML("Peak Infectious Population")),
                              textOutput("time_to_max"),
                              br(),
                              plotlyOutput("virusPlot"),
+                             br(),
+                             h4(HTML("Peak New Deaths")),
+                             br(),
+                             plotlyOutput("virusPlotPeakDeaths")
                          )
                 ),
-                tabPanel("US State", fluid = TRUE,
+                tabPanel("US States", fluid = TRUE,
                          mainPanel(
                              selectInput(inputId = "state",
                                          label = "Select US State",
@@ -249,10 +259,14 @@ ui <- fluidPage(
                              br(),
                              plotlyOutput("stateVirusPlot30Days"),
                              br(),
-                             h4(HTML("Peak Infectious Projection")),
+                             h4(HTML("Peak Infectious Population")),
                              textOutput("state_time_to_max"),
                              br(),
-                             plotlyOutput("stateVirusPlot")
+                             plotlyOutput("stateVirusPlot"),
+                             br(),
+                             h4(HTML("Peak New Deaths")),
+                             br(),
+                             plotlyOutput("stateVirusPlotPeakDeaths")
                          )
                 )
             )
@@ -274,7 +288,7 @@ testinputs <- function() {
 # Define server logic required to draw a histogram
 server <- function(input, output) {
     derive_country_stats <- reactive({
-#  derive_country_stats <- function() {     ## for debugging
+#   derive_country_stats <- function() {     ## for debugging
         if (input$country == "All") {
             df <- coronavirus %>%
                 group_by(date, type) %>% 
@@ -293,10 +307,11 @@ server <- function(input, output) {
         df <- df %>% 
             mutate(type = ifelse(type == "confirmed", "infected", type))
         df
-    })
+    }
+ )
 
 model_builder <- reactive({
-        #   model_builder <- function(){
+#model_builder <- function(){
         
         country_info <- full_countries %>% 
             filter(country == input$country) %>% 
@@ -306,10 +321,11 @@ model_builder <- reactive({
         df <- derive_country_stats()
         run_model(df, total_susceptible_population, input$infection_duration,
                   input$r0, input$death_rate/100, input$projection_duration)
-    })
+    }
+)
     
 derive_state_stats <- reactive({     ## for debugging
-## derive_state_stats <- function() {
+# derive_state_stats <- function() {
         if (input$state == "All") {
             df <- nytimes_us_cases %>%
                 group_by(date, type) %>% 
@@ -349,6 +365,8 @@ derive_state_stats <- reactive({     ## for debugging
  }
  )
 
+ ## Starting Country Plots
+ 
     output$virusPlot <- renderPlotly({
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=10,  family="Sans"))
@@ -401,7 +419,7 @@ derive_state_stats <- reactive({     ## for debugging
         g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
             geom_line() +
             scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
-            scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
                          expand = expansion(0, 0.4)) +
             scale_color_brewer(palette = "Dark2") +
             
@@ -434,7 +452,7 @@ derive_state_stats <- reactive({     ## for debugging
             size = 12)
         fig <- fig %>% layout(font=t)
     })
-    
+        
     output$virusPlot30Days <- renderPlotly({
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=12,  family="Sans"))
@@ -488,7 +506,7 @@ derive_state_stats <- reactive({     ## for debugging
         g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
             geom_line() +
             scale_y_continuous(label = comma) +
-            scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), todays_values_x_value + days(33)), date_labels = "%B %d",
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), todays_values_x_value + days(33)), date_labels = "%B %d",
                          expand = expansion(0, 0.4)) +
             scale_color_brewer(palette = "Dark2") +
             
@@ -522,7 +540,93 @@ derive_state_stats <- reactive({     ## for debugging
             size = 12)
         fig <- fig %>% layout(font=t)
         })
-   
+  
+    output$virusPlotPeakDeaths <- renderPlotly({
+        theme_set(theme_minimal()) %+replace%
+            theme(text=element_text(size=10,  family="Sans"))
+        model_result <- model_builder()
+        
+        todays_values <- model_result %>% 
+            filter(date == today()) %>% 
+            select(date, new_infections, new_deaths) %>% 
+            mutate(datestring = format(date, "%B %d"),
+                   new_infection_string = paste0("New infections: ", prettyNum(new_infections, big.mark = ",")),
+                   new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")))
+        
+        todays_values_x_value <- todays_values$date + days(3)
+        todays_values_string <-  glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_deaths_string}")
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        ## name mapping
+        
+        name_map <- tribble( ~column_name, ~Category,
+                             "total_infections",      "Total Infections",
+                             "currently_infectious",  "Currently Infectious",
+                             "new_infections",        "New Infections",
+                             "new_deaths",            "New Deaths",
+                             "total_deaths",          "Total Deaths",
+                             "new_recoveries",        "New Recoveries",
+                             "total_recoveries",      "Total Recoveries",
+                             "susceptible",           "Suspectible Population")
+        
+        projection_long <- model_result %>% 
+            select(date, new_infections, new_deaths) %>% 
+            pivot_longer(new_infections:new_deaths)
+        
+        max_new_deaths <- model_result %>% 
+            filter(model_result$new_deaths == max(model_result$new_deaths)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        max_plot_y_value <- max(projection_long$value) * 0.50
+        max_new_deaths_text_x_value <- max_new_deaths$date - days(3)
+        
+        plot_df <- projection_long %>% 
+            left_join(name_map, by = c("name" = "column_name"))
+        
+        g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
+            geom_line() +
+            scale_y_continuous(labels = unit_format(accuracy = 1, unit = "000", scale = 1e-3)) +
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+                         expand = expansion(0, 0.4)) +
+            scale_color_brewer(palette = "Dark2") +
+            
+            ## annotate for latest reported values
+            
+            annotate("segment", x = todays_values$date, xend = todays_values$date, 
+                     y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
+            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+                     color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = todays_values_string) +
+            
+            ## and for peak deaths
+            
+            annotate("segment", x = max_new_deaths_text_x_value, xend = max_new_deaths_text_x_value,
+                     y = 0, yend = max_plot_y_value, color = "gray20",  linetype = "dashed") +
+            annotate("text",  x = max_new_deaths_text_x_value + days(15), y = max_plot_y_value * 1.2,
+                     color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = paste0("Peak new deaths\nper day: ",
+                                    prettyNum(round(max_new_deaths$new_deaths), big.mark = ","),
+                                    "\non ", format(max_new_deaths$date, "%B %d"))) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+            labs(x = "", y = "", color = "")
+        
+        fig <- ggplotly(g, tooltip = c("x", "y", "group"))
+        t <- list(
+            family = "arial",
+            size = 12)
+        fig <- fig %>% layout(font=t)
+    })
+
+    
+## Now State Plots  
+     
     output$stateVirusPlot <- renderPlotly({
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=10,  family="Sans"))
@@ -536,7 +640,7 @@ derive_state_stats <- reactive({     ## for debugging
                    datestring = format(date, "%B %d"))
         
         todays_values_x_value <- todays_values$date - days(3)
-        todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
+        todays_values_string <-  paste0(first(todays_values$datestring), "\n", 
                                         paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
         
         final_values <- model_result %>% 
@@ -575,7 +679,7 @@ derive_state_stats <- reactive({     ## for debugging
         g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
             geom_line() +
             scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
-            scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
                          expand = expansion(0, 0.4)) +
             scale_color_brewer(palette = "Dark2") +
             
@@ -601,7 +705,7 @@ derive_state_stats <- reactive({     ## for debugging
                      color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
                      label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
-            labs(title = "State projection", x = "", y = "", color = "")
+            labs(x = "", y = "", color = "")
         fig <- ggplotly(g, tooltip = c("x", "y", "group"))
         t <- list(
             family = "arial",
@@ -621,7 +725,7 @@ derive_state_stats <- reactive({     ## for debugging
                    datestring = format(date, "%B %d"))
         
         todays_values_x_value <- todays_values$date - days(3)
-        todays_values_string <-  paste0("Reported on ", first(todays_values$datestring), "\n", 
+        todays_values_string <-  paste0(first(todays_values$datestring), "\n", 
                                         paste(with(todays_values, glue("{type}: {casestring}\n")), collapse="\n"))
         model_result <- state_model_builder() %>% 
             filter(date <= head(todays_values_x_value,1) + days(33))
@@ -662,7 +766,7 @@ derive_state_stats <- reactive({     ## for debugging
         g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
             geom_line() +
             scale_y_continuous(labels = unit_format(accuracy = 0.1, unit = "M", scale = 1e-6)) +
-            scale_x_date(date_breaks = "2 weeks", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
                          expand = expansion(0, 0.4)) +
             scale_color_brewer(palette = "Dark2") +
             
@@ -676,11 +780,12 @@ derive_state_stats <- reactive({     ## for debugging
             ## and for peak infectious population
             
             annotate("segment", x = max_infectious$date, xend = max_infectious$date, y = 0, yend = max_plot_y_value * 0.9, color = "gray20",  linetype = "dashed") +
-            annotate("text",  x = max_infection_text_x_value, y = max_plot_y_value, 
-                     color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
-                     label = paste0("Peak infectious population\n",
-                                    prettyNum(round(max_infectious$currently_infectious), big.mark = ","),
-                                    "\non ", format(max_infectious$date, "%B %d"))) +
+            annotate("text",  x = max_infection_text_x_value - days(14), y = max_plot_y_value, 
+                     color = "gray20", size = 2.75,  hjust = "inward", vjust = "inward",
+                     label = paste0(format(max_infectious$date, "%B %d"),
+                                    "\nInfected: ", prettyNum(round(max_infectious$currently_infectious), 
+                                                              big.mark = ","),
+                                    "\nDeaths: ", prettyNum(round(max_infectious$total_deaths), big.mark = ","))) +
             
             ## and for total deaths            
             
@@ -688,7 +793,7 @@ derive_state_stats <- reactive({     ## for debugging
                      color = "gray20", size = 2.75, hjust = "inward", vjust = "inward",
                      label = paste0("Total deaths\n", prettyNum(round(final_values$total_deaths), big.mark = ","))) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
-            labs(title = "State projection", x = "", y = "", color = "")
+            labs(x = "", y = "", color = "")
         fig <- ggplotly(g, tooltip = c("x", "y", "group"))
         t <- list(
             family = "arial",
@@ -696,7 +801,89 @@ derive_state_stats <- reactive({     ## for debugging
         fig <- fig %>% layout(font=t)
     })
 
-       
+    output$stateVirusPlotPeakDeaths <- renderPlotly({
+        theme_set(theme_minimal()) %+replace%
+            theme(text=element_text(size=10,  family="Sans"))
+        model_result <- state_model_builder()
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        ## name mapping
+        
+        name_map <- tribble( ~column_name, ~Category,
+                             "total_infections",      "Total Infections",
+                             "currently_infectious",  "Currently Infectious",
+                             "new_infections",        "New Infections",
+                             "new_deaths",            "New Deaths",
+                             "total_deaths",          "Total Deaths",
+                             "new_recoveries",        "New Recoveries",
+                             "total_recoveries",      "Total Recoveries",
+                             "susceptible",           "Suspectible Population")
+
+        todays_values <- model_result %>% 
+            filter(date == today()) %>% 
+            select(date, new_infections, new_deaths) %>% 
+            mutate(datestring = format(date, "%B %d"),
+                   new_infection_string = paste0("New infections: ", prettyNum(new_infections, big.mark = ",")),
+                   new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")))
+        
+        todays_values_x_value <- todays_values$date + days(3)
+        todays_values_string <-  glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_deaths_string}")
+        
+        projection_long <- model_result %>% 
+            select(date, new_infections, new_deaths) %>% 
+            pivot_longer(new_infections:new_deaths)
+        
+        max_new_deaths <- model_result %>% 
+            filter(model_result$new_deaths == max(model_result$new_deaths)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        final_values <- model_result %>% 
+            filter(date == max(model_result$date)) %>% 
+            head(n = 1)       ## in case we get multiple results
+        
+        max_plot_y_value <- max(projection_long$value) * 0.50
+        max_new_deaths_text_x_value <- max_new_deaths$date - days(3)
+        
+        plot_df <- projection_long %>% 
+            left_join(name_map, by = c("name" = "column_name"))
+        
+        g <-ggplot(plot_df, aes(x = date, y = value, color = Category, group = Category)) +
+            geom_line() +
+            scale_y_continuous(labels = unit_format(accuracy = 1, unit = "000", scale = 1e-3)) +
+            scale_x_date(date_breaks = "1 month", limits = c(min(projection_long$date), max(projection_long$date) + days(10)), date_labels = "%B %d",
+                         expand = expansion(0, 0.4)) +
+            scale_color_brewer(palette = "Dark2") +
+            
+            ## annotate for latest reported values
+            
+            annotate("segment", x = todays_values$date, xend = todays_values$date, 
+                     y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
+            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+                     color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = todays_values_string) +
+            
+            ## and for peak deaths
+            
+            annotate("segment", x = max_new_deaths_text_x_value, xend = max_new_deaths_text_x_value,
+                     y = 0, yend = max_plot_y_value, color = "gray20",  linetype = "dashed") +
+            annotate("text",  x = max_new_deaths_text_x_value + days(15), y = max_plot_y_value * 1.2,
+                     color = "gray20", size = 2.75,  hjust = "right", vjust = "inward",
+                     label = paste0("Peak new deaths\nper day: ",
+                                    prettyNum(round(max_new_deaths$new_deaths), big.mark = ","),
+                                    "\non ", format(max_new_deaths$date, "%B %d"))) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+            labs(x = "", y = "", color = "")
+        
+        fig <- ggplotly(g, tooltip = c("x", "y", "group"))
+        t <- list(
+            family = "arial",
+            size = 12)
+        fig <- fig %>% layout(font=t)
+    })
+          
     output$country_title <- renderText({
         glue("{input$country} Coronavirus Forecast")
             })
