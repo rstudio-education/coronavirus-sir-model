@@ -934,7 +934,7 @@ derive_state_stats <- reactive({     ## for debugging
         
         days_til_peak <- max_infectious$date - today()
         if (days_til_peak >= days(0)) {
-          first_string <- glue("({days_til_peak} days until infections peak in {input$country}.")
+          first_string <- glue("{days_til_peak} days until infections peak in {input$country}.")
         } else {
           first_string <-  glue("{-days_til_peak} days since infections peaked in {input$country}.")
         }
