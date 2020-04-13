@@ -138,6 +138,7 @@ run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
     fnew <- ww_range %>% 
         mutate(total_infections     = infected,
                currently_infectious = infected - lag(infected, duration) - deaths,
+               currently_infectious = ifelse(currently_infectious < 0, 0, currently_infectious),
                new_infections       = infected - lag(infected),
                new_deaths           = deaths - lag(deaths),
                total_deaths         = deaths,
@@ -181,6 +182,7 @@ run_model <- function(f, population, duration, rnaught, drate, proj_duration) {
         
         fnew$new_infections[i]       <-  ifelse (fnew$di_dt[i] < 0, 0, fnew$di_dt[i])
         fnew$currently_infectious[i] <-  fnew$currently_infectious[i - 1] + fnew$di_dt[i]
+        fnew$currently_infectious[i] <-  ifelse(fnew$currently_infectious[i] < 0, browser(), fnew$currently_infectious[i])
         fnew$new_deaths[i]           <-  round(fnew$currently_infectious[i - 1] * drate / duration)
         fnew$new_recoveries[i]       <-  fnew$dr_dt[i]
         fnew$susceptible[i]          <-  fnew$susceptible[i - 1]      + fnew$ds_dt[i]
@@ -253,8 +255,12 @@ ui <- fluidPage(
                              br(),
                              plotlyOutput("virusPlot"),
                              br(),
-                             h4(HTML("Peak New Deaths")),
+                             h4(HTML("Derivative Plots")),
                              br(),
+                             p(div(HTML("This plot shows the daily change in infections (i.e., the first derivative of total infections)"),
+                                   HTML("and the rate of change in infections (the second derivative) and the daily change in deaths. I've"),
+                                   HTML("included this plot because these metrics are often (incorrectly) cited in the press as indicating"),
+                                   HTML("that the pandemic has turned the corner."))),
                              plotlyOutput("virusPlotPeakDeaths")
                          )
                 ),
@@ -275,8 +281,12 @@ ui <- fluidPage(
                              br(),
                              plotlyOutput("stateVirusPlot"),
                              br(),
-                             h4(HTML("Peak New Deaths")),
+                             h4(HTML("Derivative Plots")),
                              br(),
+                             p(div(HTML("This plot shows the daily change in infections (i.e., the first derivative of total infections)"),
+                                   HTML("and the rate of change in infections (the second derivative) and the daily change in deaths and the rate of change in deaths. I've"),
+                                   HTML("included this plot because these metrics are often (incorrectly) cited in the press as indicating"),
+                                   HTML("that the pandemic has turned the corner."))),
                              plotlyOutput("stateVirusPlotPeakDeaths")
                          )
                 )
@@ -322,7 +332,7 @@ server <- function(input, output) {
  )
 
 model_builder <- reactive({
-#model_builder <- function(){
+## model_builder <- function(){
         
         country_info <- full_countries %>% 
             filter(country == input$country) %>% 
@@ -336,7 +346,7 @@ model_builder <- reactive({
 )
     
 derive_state_stats <- reactive({     ## for debugging
-# derive_state_stats <- function() {
+## derive_state_stats <- function() {
         if (input$state == "All") {
             df <- nytimes_us_cases %>%
                 group_by(date, type) %>% 
@@ -550,21 +560,24 @@ derive_state_stats <- reactive({     ## for debugging
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=10,  family="Sans"))
         model_result <- model_builder() %>% 
-          mutate(di2_dt = new_infections - lag(new_infections))
+          mutate(di2_dt = new_infections - lag(new_infections),
+                 dd2_dt = new_deaths - lag(new_deaths))
 
         country_stats <- derive_country_stats()
         latest_historical_date <- max(country_stats$date, na.rm = TRUE)
           
         todays_values <- model_result %>% 
             filter(date == latest_historical_date) %>% 
-            select(date, new_infections, new_deaths, di2_dt) %>% 
+            select(date, new_infections, new_deaths, di2_dt, dd2_dt) %>% 
             mutate(datestring = format(date, "%B %d"),
                    new_infection_string = paste0("New infections: ", prettyNum(new_infections, big.mark = ",")),
                    new_infection_change_string = paste0("New infection ROC: ", prettyNum(di2_dt, big.mark = ",")),
-                   new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")))
+                   new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")),
+                   new_deaths_change_string = paste0("New deaths ROC: ", prettyNum(dd2_dt, big.mark = ",")))
         
         todays_values_x_value <- todays_values$date + days(3)
-        todays_values_string <-  glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_infection_change_string}\n{todays_values$new_deaths_string}")
+        todays_values_string <- glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_infection_change_string}")
+        todays_values_string <- glue("{todays_values_string}\n{todays_values$new_deaths_string}\n{todays_values$new_deaths_change_string}")
         
         final_values <- model_result %>% 
             filter(date == max(model_result$date, na.rm = TRUE)) %>% 
@@ -581,11 +594,12 @@ derive_state_stats <- reactive({     ## for debugging
                              "new_recoveries",        "New Recoveries",
                              "total_recoveries",      "Total Recoveries",
                              "susceptible",           "Suspectible Population",
-                             "di2_dt",                "New Infection\nChange Rate")
+                             "di2_dt",                "New Infection\nChange Rate",
+                             "dd2_dt",                "New Deaths\nChange Rate")
         
         projection_long <- model_result %>% 
-            select(date, new_infections, new_deaths, di2_dt) %>% 
-            pivot_longer(new_infections:di2_dt)
+            select(date, new_infections, new_deaths, di2_dt, dd2_dt) %>% 
+            pivot_longer(new_infections:dd2_dt)
         
         max_new_deaths <- model_result %>% 
             filter(model_result$new_deaths == max(model_result$new_deaths, na.rm = TRUE)) %>% 
@@ -614,7 +628,7 @@ derive_state_stats <- reactive({     ## for debugging
             
             annotate("segment", x = todays_values$date, xend = todays_values$date, 
                      y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
-            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.75, 
                      color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
                      label = todays_values_string) +
             
@@ -811,7 +825,8 @@ derive_state_stats <- reactive({     ## for debugging
         theme_set(theme_minimal()) %+replace%
             theme(text=element_text(size=10,  family="Sans"))
         model_result <- state_model_builder() %>% 
-          mutate(di2_dt = new_infections - lag(new_infections))
+          mutate(di2_dt = new_infections - lag(new_infections),
+                 dd2_dt = new_deaths - lag(new_deaths))
         
         final_values <- model_result %>% 
             filter(date == max(model_result$date, na.rm = TRUE)) %>% 
@@ -828,25 +843,28 @@ derive_state_stats <- reactive({     ## for debugging
                              "new_recoveries",        "New Recoveries",
                              "total_recoveries",      "Total Recoveries",
                              "susceptible",           "Suspectible Population",
-                             "di2_dt",                "New Infection\nChange Rate")
+                             "di2_dt",                "New Infection\nChange Rate",
+                             "dd2_dt",                "New Deaths\nChange Rate")
         
         state_stats <- derive_state_stats()
         latest_historical_date <- max(state_stats$date, na.rm = TRUE)
         
         todays_values <- model_result %>% 
           filter(date == latest_historical_date) %>% 
-          select(date, new_infections, new_deaths, di2_dt) %>% 
+          select(date, new_infections, new_deaths, di2_dt, dd2_dt) %>% 
           mutate(datestring = format(date, "%B %d"),
                  new_infection_string = paste0("New infections: ", prettyNum(new_infections, big.mark = ",")),
                  new_infection_change_string = paste0("New infection ROC: ", prettyNum(di2_dt, big.mark = ",")),
-                 new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")))
+                 new_deaths_string = paste0("New deaths: ", prettyNum(new_deaths, big.mark = ",")),
+                 new_deaths_change_string = paste0("New deaths ROC: ", prettyNum(dd2_dt, big.mark = ",")))
         
         todays_values_x_value <- todays_values$date + days(3)
-        todays_values_string <-  glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_deaths_string}")
+        todays_values_string <- glue("{todays_values$datestring}\n{todays_values$new_infection_string}\n{todays_values$new_infection_change_string}")
+        todays_values_string <- glue("{todays_values_string}\n{todays_values$new_deaths_string}\n{todays_values$new_deaths_change_string}")
         
         projection_long <- model_result %>% 
-          select(date, new_infections, new_deaths, di2_dt) %>% 
-          pivot_longer(new_infections:di2_dt)
+          select(date, new_infections, new_deaths, di2_dt, dd2_dt) %>% 
+          pivot_longer(new_infections:dd2_dt)
         
         max_new_deaths <- model_result %>% 
             filter(model_result$new_deaths == max(model_result$new_deaths, na.rm = TRUE)) %>% 
@@ -875,7 +893,7 @@ derive_state_stats <- reactive({     ## for debugging
             
             annotate("segment", x = todays_values$date, xend = todays_values$date, 
                      y = 0, yend = max_plot_y_value * 0.5, color = "gray20",  linetype = "dotted") +
-            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.65, 
+            annotate("text",  x = todays_values_x_value, y = max_plot_y_value * 0.75, 
                      color = "gray30", size = 2.75,  hjust = "right", vjust = "inward",
                      label = todays_values_string) +
             
@@ -894,7 +912,12 @@ derive_state_stats <- reactive({     ## for debugging
         fig <- ggplotly(g, tooltip = c("x", "y", "group"))
         fig %>% layout(font = font_list, legend = legend_list)
     })
-          
+    
+    ##########################
+    ## Dynamic text outputs
+    ##########################
+    
+    
     output$country_title <- renderText({
         glue("{input$country} Coronavirus Forecast")
             })
@@ -909,7 +932,12 @@ derive_state_stats <- reactive({     ## for debugging
             filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
             head(n = 1)       ## in case we get multiple results
         
-        first_string <- glue("{max_infectious$date - today()} days until infections peak in {input$country}.")
+        days_til_peak <- max_infectious$date - today()
+        if (days_til_peak >= days(0)) {
+          first_string <- glue("({days_til_peak} days until infections peak in {input$country}.")
+        } else {
+          first_string <-  glue("{-days_til_peak} days since infections peaked in {input$country}.")
+        }
         country_info <- full_countries %>% 
             filter(country == input$country) %>% 
             head(1)
@@ -919,24 +947,28 @@ derive_state_stats <- reactive({     ## for debugging
         })
 
     output$state_time_to_max <- renderText({
-        model_result <- state_model_builder()
-        max_infectious <- model_result %>% 
-            filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
-            head(n = 1)       ## in case we get multiple results
-        
-        first_string <- glue("{max_infectious$date - today()} days until infections peak in {input$state}.")
-        if (input$state == "All") {
-            state_stats <- tibble(population = sum(state_populations$population))
-        } else {
-            state_stats <- state_populations %>% 
-                filter(state == input$state) %>% 
-                select(population)
-        }
-        state_population_susceptible <- state_stats$population * input$percent_susceptible_population/100
-        second_string <- glue("Susceptible population = {prettyNum(round(state_population_susceptible/1e6,1), big.mark = ',')}M, R0 = {input$r0}, infection duration = {input$infection_duration}, death rate = {input$death_rate}%")
-        return(c(first_string, second_string))
+      model_result <- state_model_builder()
+      max_infectious <- model_result %>% 
+        filter(model_result$currently_infectious == max(model_result$currently_infectious)) %>% 
+        head(n = 1)       ## in case we get multiple results
+      days_til_peak <- max_infectious$date - today()
+      if (days_til_peak >= days(0)) {
+        first_string <- glue("{days_til_peak} days until infections peak in {input$state}.")
+      } else {
+        first_string <-  glue("{-days_til_peak} days since infections peaked in {input$state}.")
+      }
+      if (input$state == "All") {
+        state_stats <- tibble(population = sum(state_populations$population))
+      } else {
+        state_stats <- state_populations %>% 
+          filter(state == input$state) %>% 
+          select(population)
+      }
+      state_population_susceptible <- state_stats$population * input$percent_susceptible_population/100
+      second_string <- glue("Susceptible population = {prettyNum(round(state_population_susceptible/1e6,1), big.mark = ',')}M, R0 = {input$r0}, infection duration = {input$infection_duration}, death rate = {input$death_rate}%")
+      return(c(first_string, second_string))
     })
-        
+    
     output$caption <- renderText({
         country_info <- full_countries %>% 
             filter(country == input$country) %>% 
